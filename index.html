@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Greenhouse Dashboard (Public Read)</title>
+  <title>Greenhouse Dashboard (Public Read, 4 zone tables)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0b0f0c; --card:#0f1511; --muted:#9fb3a6; --accent:#2e8b57; --border:#1e3b2a; --text:#f3f7f4; }
@@ -31,10 +31,9 @@
 
   <main>
     <section class="card">
-      <h2>Zones: 1 — 4</h2>
+      <h2>Zones: 1 — 4 (tables: public.zone1..zone4)</h2>
       <p class="note">
-        This page reads from table "readings" for device_id=greenhouseA. No sign-in required.
-        Be sure RLS allows anon SELECT on public.readings and the table is added to supabase_realtime.
+        Reads from 4 separate tables (zone1..zone4). Ensure anon SELECT RLS on each table and they are added to supabase_realtime.
       </p>
       <div id="status" class="warn"></div>
       <div id="zonesContainer" class="zones"></div>
@@ -46,14 +45,27 @@
   </footer>
 
   <script>
-    // Supabase config (from your .env and Supabase Settings)
-    const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co"; // from .env
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NjUwODUsImV4cCI6MjA3MzM0MTA4NX0.z6NDGzZqhSjuxDQj4kkw9ZF-wLKRQNKoEXxz9htlZgY";     // Settings > API > Public anon key
-    const DEVICE_ID = "greenhouseA";                                  // from .env
+    // Supabase config
+    const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NjUwODUsImV4cCI6MjA3MzM0MTA4NX0.z6NDGzZqhSjuxDQj4kkw9ZF-wLKRQNKoEXxz9htlZgY";
 
-    // Zones and chart setup
-    const ZONES = [1,2,3,4];
-    const HISTORY_MINUTES = 60;
+    // Zones and tables
+    const ZONES = [1, 2, 3, 4];
+    const ZONE_TABLES = { 1: "zone1", 2: "zone2", 3: "zone3", 4: "zone4" };
+
+    // History and limits
+    const HISTORY_MINUTES = 60;   // initial history to load
+    const LIVE_WINDOW_HOURS = 6;  // keep last N hours live
+    const MAX_POINTS = 5000;      // hard cap per series
+
+    // Fixed Y ranges (prevents runaway autoscale)
+    const Y_RANGES = {
+      air:  { min: -10, max: 50 },
+      rh:   { min:   0, max: 100 },
+      soil: { min:   0, max: 5.0 },
+      root: { min: -10, max: 50 },
+    };
+
     const COLORS = { air:"#00FFFF", rh:"#FFD700", soil:"#FF7F50", root:"#7CFC00" };
 
     const { createClient } = window.supabase;
@@ -62,12 +74,13 @@
     const statusEl = document.getElementById("status");
     const zonesContainer = document.getElementById("zonesContainer");
     const charts = {};
+    const channels = [];
 
     function createZoneCard(zone) {
       const wrap = document.createElement("section");
       wrap.className = "card zone";
       wrap.innerHTML = `
-        <h3>Zone ${zone}</h3>
+        <h3>Zone ${zone} (${ZONE_TABLES[zone]})</h3>
         <div class="grid">
           <div class="chart-card"><h4>Air Temp (°C)</h4><canvas id="z${zone}-air"></canvas></div>
           <div class="chart-card"><h4>Relative Humidity (%)</h4><canvas id="z${zone}-rh"></canvas></div>
@@ -77,13 +90,14 @@
       zonesContainer.appendChild(wrap);
     }
 
-    function makeLineChart(canvas, color, label) {
+    function makeLineChart(canvas, color, label, yrange) {
       const ctx = canvas.getContext("2d");
       return new Chart(ctx, {
         type: "line",
-        data: { datasets: [{ label, data: [], borderColor: color, pointRadius: 0, borderWidth: 1.6, tension: 0.2 }] },
+        data: { datasets: [{ label, data: [], borderColor: color, pointRadius: 0, borderWidth: 1.4, tension: 0.2 }] },
         options: {
           animation: false, responsive: true, maintainAspectRatio: false,
+          parsing: false,
           scales: {
             x: {
               type: "linear",
@@ -97,7 +111,12 @@
               },
               grid: { color: "rgba(255,255,255,0.1)" }
             },
-            y: { ticks: { color: "#eee" }, grid: { color: "rgba(255,255,255,0.1)" } }
+            y: {
+              min: yrange.min,
+              max: yrange.max,
+              ticks: { color: "#eee" },
+              grid: { color: "rgba(255,255,255,0.1)" }
+            }
           },
           plugins: {
             legend: { labels: { color: "#eee" } },
@@ -107,60 +126,67 @@
       });
     }
 
+    function sanitizeAndPush(chart, x, y, key) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const r = Y_RANGES[key];
+      if (y < r.min - 5 || y > r.max + 5) return; // drop absurd outliers
+      const ds = chart.data.datasets[0].data;
+      ds.push({ x, y });
+      // Trim by time window
+      const cutoff = (Date.now()/1000) - (LIVE_WINDOW_HOURS * 3600);
+      while (ds.length && ds[0].x <= cutoff) ds.shift();
+      // Trim by hard cap
+      if (ds.length > MAX_POINTS) ds.splice(0, ds.length - MAX_POINTS);
+    }
+
+    function updateAll(zone) {
+      Object.values(charts[zone]).forEach(c => c.update('none'));
+    }
+
     async function loadInitial(zone) {
+      const table = ZONE_TABLES[zone];
       const since = (Date.now()/1000) - (HISTORY_MINUTES * 60);
       const { data, error } = await supabase
-        .from("readings")
-        .select("ts_utc, air_c, rh_pct, soil_v, root_c")
-        .eq("device_id", DEVICE_ID)
-        .eq("zone", zone)
-        .gt("ts_utc", since)
-        .order("ts_utc", { ascending: true });
+        .from(table)
+        .select("epoch, air_c, rh_pct, soil_v, root_c")
+        .gt("epoch", since)
+        .order("epoch", { ascending: true });
 
       if (error) {
-        console.warn(`Initial load error (zone ${zone}):`, error);
-        statusEl.textContent = `Error loading data: ${error.message}`;
+        console.warn(`Initial load error for ${table}:`, error);
+        statusEl.textContent = `Error loading ${table}: ${error.message}`;
         return;
       }
       for (const r of (data || [])) {
-        const x = r.ts_utc;
-        if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
-        if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
-        if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
-        if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
+        const x = Number(r.epoch);
+        if (r.air_c  != null) sanitizeAndPush(charts[zone].air,  x, Number(r.air_c),  "air");
+        if (r.rh_pct != null) sanitizeAndPush(charts[zone].rh,   x, Number(r.rh_pct), "rh");
+        if (r.soil_v != null) sanitizeAndPush(charts[zone].soil, x, Number(r.soil_v), "soil");
+        if (r.root_c != null) sanitizeAndPush(charts[zone].root, x, Number(r.root_c), "root");
       }
-      Object.values(charts[zone]).forEach(c => c.update());
-    }
-
-    function keepWithinHours(zone, hours=6) {
-      const cutoff = (Date.now()/1000) - (hours*3600);
-      for (const key of ["air","rh","soil","root"]) {
-        const ds = charts[zone][key].data.datasets[0].data;
-        charts[zone][key].data.datasets[0].data = ds.filter(p => p.x > cutoff);
-      }
+      updateAll(zone);
     }
 
     function subscribeRealtime(zone) {
+      const table = ZONE_TABLES[zone];
       const ch = supabase
-        .channel(`rt:readings:z${zone}`)
+        .channel(`rt:${table}`)
         .on("postgres_changes",
-          { event: "INSERT", schema: "public", table: "readings", filter: `device_id=eq.${DEVICE_ID}` },
+          { event: "INSERT", schema: "public", table },
           (payload) => {
             const r = payload.new || {};
-            if (r.zone !== zone) return;
-            const x = r.ts_utc;
-            if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
-            if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
-            if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
-            if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
-            keepWithinHours(zone, 6);
-            Object.values(charts[zone]).forEach(c => c.update());
+            const x = Number(r.epoch);
+            if (r.air_c  != null) sanitizeAndPush(charts[zone].air,  x, Number(r.air_c),  "air");
+            if (r.rh_pct != null) sanitizeAndPush(charts[zone].rh,   x, Number(r.rh_pct), "rh");
+            if (r.soil_v != null) sanitizeAndPush(charts[zone].soil, x, Number(r.soil_v), "soil");
+            if (r.root_c != null) sanitizeAndPush(charts[zone].root, x, Number(r.root_c), "root");
+            updateAll(zone);
           }
         )
         .subscribe((status) => {
-          if (status === "SUBSCRIBED") console.log(`Realtime subscribed for Zone ${zone}`);
+          if (status === "SUBSCRIBED") console.log(`Realtime subscribed: ${table}`);
         });
-      return ch;
+      channels.push(ch);
     }
 
     async function init() {
@@ -168,10 +194,10 @@
       for (const z of ZONES) {
         createZoneCard(z);
         charts[z] = {
-          air:  makeLineChart(document.getElementById(`z${z}-air`),  COLORS.air,  "Air °C"),
-          rh:   makeLineChart(document.getElementById(`z${z}-rh`),   COLORS.rh,   "RH %"),
-          soil: makeLineChart(document.getElementById(`z${z}-soil`), COLORS.soil, "Soil V"),
-          root: makeLineChart(document.getElementById(`z${z}-root`), COLORS.root, "Root °C"),
+          air:  makeLineChart(document.getElementById(`z${z}-air`),  COLORS.air,  "Air °C",  Y_RANGES.air),
+          rh:   makeLineChart(document.getElementById(`z${z}-rh`),   COLORS.rh,   "RH %",    Y_RANGES.rh),
+          soil: makeLineChart(document.getElementById(`z${z}-soil`), COLORS.soil, "Soil V",  Y_RANGES.soil),
+          root: makeLineChart(document.getElementById(`z${z}-root`), COLORS.root, "Root °C", Y_RANGES.root),
         };
       }
       await Promise.all(ZONES.map(z => loadInitial(z)));
