@@ -15,7 +15,10 @@
     .zones { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:16px; }
     .zone h3 { margin:6px 0 10px; }
     .grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; }
-    .chart-card { min-height:240px; }
+    /* Hard-fix chart sizing to stop page growth */
+    .chart-card { height: 260px; position: relative; overflow: hidden; }
+    .chart-card canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; display:block; }
+    @media (max-width: 900px) { .zones { grid-template-columns: 1fr; } .chart-card { height: 220px; } }
     .chart-card h4 { margin:4px 0 8px; color:var(--muted); font-weight:600; }
     .footer { text-align:center; color:var(--muted); padding:20px 0 60px; }
     .note { color: var(--muted); font-size: 14px; }
@@ -32,9 +35,7 @@
   <main>
     <section class="card">
       <h2>Zones: 1 — 4 (tables: public.zone1..zone4)</h2>
-      <p class="note">
-        Reads from 4 separate tables (zone1..zone4). Ensure anon SELECT RLS on each table and they are added to supabase_realtime.
-      </p>
+      <p class="note">Reads from 4 separate tables (zone1..zone4). Anon SELECT via RLS, realtime on each table.</p>
       <div id="status" class="warn"></div>
       <div id="zonesContainer" class="zones"></div>
     </section>
@@ -56,7 +57,7 @@
     // History and limits
     const HISTORY_MINUTES = 60;   // initial history to load
     const LIVE_WINDOW_HOURS = 6;  // keep last N hours live
-    const MAX_POINTS = 5000;      // hard cap per series
+    const MAX_POINTS = 4000;      // hard cap per series
 
     // Fixed Y ranges (prevents runaway autoscale)
     const Y_RANGES = {
@@ -96,7 +97,10 @@
         type: "line",
         data: { datasets: [{ label, data: [], borderColor: color, pointRadius: 0, borderWidth: 1.4, tension: 0.2 }] },
         options: {
-          animation: false, responsive: true, maintainAspectRatio: false,
+          responsive: true,
+          maintainAspectRatio: false,      // we control size via CSS
+          resizeDelay: 150,                 // debounce to avoid resize loops
+          animation: false,
           parsing: false,
           scales: {
             x: {
@@ -121,7 +125,8 @@
           plugins: {
             legend: { labels: { color: "#eee" } },
             tooltip: { callbacks: { title: (items) => new Date(items[0].parsed.x*1000).toLocaleString() } }
-          }
+          },
+          layout: { padding: { left: 8, right: 8, top: 6, bottom: 6 } }
         }
       });
     }
@@ -132,7 +137,7 @@
       if (y < r.min - 5 || y > r.max + 5) return; // drop absurd outliers
       const ds = chart.data.datasets[0].data;
       ds.push({ x, y });
-      // Trim by time window
+      // Trim by rolling time window
       const cutoff = (Date.now()/1000) - (LIVE_WINDOW_HOURS * 3600);
       while (ds.length && ds[0].x <= cutoff) ds.shift();
       // Trim by hard cap
