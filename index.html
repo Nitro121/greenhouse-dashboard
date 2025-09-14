@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Greenhouse Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="./styles.css" />
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Greenhouse Dashboard</div>
+    <div class="spacer"></div>
+    <div id="userBox" class="userbox hidden">
+      <span id="userEmail">--</span>
+      <button id="signOutBtn" class="btn">Sign out</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <section id="authSection" class="card auth">
+      <h2>Sign in</h2>
+      <p>Enter your email to receive a magic link.</p>
+      <form id="loginForm">
+        <input id="emailInput" type="email" placeholder="you@example.com" required />
+        <button type="submit" class="btn">Send magic link</button>
+      </form>
+      <p id="authMsg" class="muted"></p>
+    </section>
+
+    <section id="dashSection" class="dashboard hidden">
+      <h2>Zones: zone1 — zone4</h2>
+      <div id="zonesContainer" class="zones"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Powered by Supabase</span>
+  </footer>
+
+  <script>
+    // ------------------ Configure your project ------------------
+    const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";       // <- replace
+    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY";              // <- replace
+
+    // Per-zone tables in your DB
+    const ZONES = [1, 2, 3, 4];
+    const ZONE_TABLES = { 1: "zone1", 2: "zone2", 3: "zone3", 4: "zone4" };
+
+    // Minutes of history to load initially
+    const HISTORY_MINUTES = 60;
+
+    // ------------------------------------------------------------
+    const COLORS = { air: "#00FFFF", rh: "#FFD700", soil: "#FF7F50", root: "#7CFC00" };
+    const { createClient } = window.supabase;
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const el = (sel) => document.querySelector(sel);
+    const authSection = el("#authSection");
+    const dashSection = el("#dashSection");
+    const userBox = el("#userBox");
+    const userEmailSpan = el("#userEmail");
+    const signOutBtn = el("#signOutBtn");
+    const zonesContainer = el("#zonesContainer");
+    const loginForm = el("#loginForm");
+    const emailInput = el("#emailInput");
+    const authMsg = el("#authMsg");
+
+    function createZoneCard(zone) {
+      const wrap = document.createElement("section");
+      wrap.className = "card zone";
+      wrap.innerHTML = `
+        <h3>Zone ${zone} (${ZONE_TABLES[zone]})</h3>
+        <div class="grid">
+          <div class="chart-card">
+            <h4>Air Temp (°C)</h4>
+            <canvas id="z${zone}-air"></canvas>
+          </div>
+          <div class="chart-card">
+            <h4>Relative Humidity (%)</h4>
+            <canvas id="z${zone}-rh"></canvas>
+          </div>
+          <div class="chart-card">
+            <h4>Soil Voltage (V)</h4>
+            <canvas id="z${zone}-soil"></canvas>
+          </div>
+          <div class="chart-card">
+            <h4>Root Temp (°C)</h4>
+            <canvas id="z${zone}-root"></canvas>
+          </div>
+        </div>
+      `;
+      zonesContainer.appendChild(wrap);
+    }
+
+    const charts = {};
+    function makeLineChart(canvas, color, label) {
+      const ctx = canvas.getContext("2d");
+      return new Chart(ctx, {
+        type: "line",
+        data: { datasets: [{ label, data: [], borderColor: color, pointRadius: 0, borderWidth: 1.6, tension: 0.2 }] },
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false,
+          scales: {
+            x: {
+              type: "linear",
+              ticks: {
+                color: "#eee",
+                callback: (v) => {
+                  const now = Date.now()/1000;
+                  const mins = Math.max(0, Math.round((now - v)/60));
+                  return `${mins}m`;
+                }
+              },
+              grid: { color: "rgba(255,255,255,0.1)" }
+            },
+            y: { ticks: { color: "#eee" }, grid: { color: "rgba(255,255,255,0.1)" } }
+          },
+          plugins: {
+            legend: { labels: { color: "#eee" } },
+            tooltip: { callbacks: { title: (items) => new Date(items[0].parsed.x*1000).toLocaleString() } }
+          }
+        }
+      });
+    }
+
+    async function loadInitial(zone) {
+      const table = ZONE_TABLES[zone];
+      const since = (Date.now()/1000) - (HISTORY_MINUTES * 60);
+      const { data, error } = await supabase
+        .from(table)
+        .select("epoch, air_c, rh_pct, soil_v, root_c")
+        .gt("epoch", since)
+        .order("epoch", { ascending: true });
+      if (error) {
+        console.warn("initial load error", table, error);
+        return;
+      }
+      for (const r of data) {
+        const x = r.epoch;
+        if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
+        if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
+        if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
+        if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
+      }
+      Object.values(charts[zone]).forEach(c => c.update());
+    }
+
+    function keepWithinHours(zone, hours=6) {
+      const cutoff = (Date.now()/1000) - (hours*3600);
+      for (const key of ["air","rh","soil","root"]) {
+        const ds = charts[zone][key].data.datasets[0].data;
+        charts[zone][key].data.datasets[0].data = ds.filter(p => p.x > cutoff);
+      }
+    }
+
+    function subscribeRealtime(zone) {
+      const table = ZONE_TABLES[zone];
+      const channel = supabase
+        .channel(`realtime:${table}`)
+        .on("postgres_changes", { event: "INSERT", schema: "public", table }, (payload) => {
+          const r = payload.new;
+          const x = r.epoch;
+          if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
+          if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
+          if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
+          if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
+          keepWithinHours(zone, 6);
+          Object.values(charts[zone]).forEach(c => c.update());
+        })
+        .subscribe();
+      return channel;
+    }
+
+    function showAuth() {
+      authSection.classList.remove("hidden");
+      dashSection.classList.add("hidden");
+      userBox.classList.add("hidden");
+    }
+
+    function showDash(user) {
+      userEmailSpan.textContent = user?.email ?? "";
+      userBox.classList.remove("hidden");
+      authSection.classList.add("hidden");
+      dashSection.classList.remove("hidden");
+    }
+
+    async function initCharts() {
+      zonesContainer.innerHTML = "";
+      for (const z of ZONES) {
+        createZoneCard(z);
+        charts[z] = {
+          air:  makeLineChart(document.getElementById(`z${z}-air`),  COLORS.air,  "Air °C"),
+          rh:   makeLineChart(document.getElementById(`z${z}-rh`),   COLORS.rh,   "RH %"),
+          soil: makeLineChart(document.getElementById(`z${z}-soil`), COLORS.soil, "Soil V"),
+          root: makeLineChart(document.getElementById(`z${z}-root`), COLORS.root, "Root °C"),
+        };
+      }
+      await Promise.all(ZONES.map(z => loadInitial(z)));
+      ZONES.forEach(z => subscribeRealtime(z));
+    }
+
+    async function refreshSessionAndRoute() {
+      const { data } = await supabase.auth.getSession();
+      if (data.session && data.session.user) {
+        showDash(data.session.user);
+        initCharts();
+      } else {
+        showAuth();
+      }
+    }
+
+    // Auth: Magic link
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = emailInput.value.trim();
+      if (!email) return;
+      authMsg.textContent = "Sending magic link…";
+      const { error } = await supabase.auth.signInWithOtp({ email });
+      authMsg.textContent = error ? `Error: ${error.message}` : "Check your email for the magic link.";
+    });
+
+    signOutBtn.addEventListener("click", async () => {
+      await supabase.auth.signOut();
+      location.reload();
+    });
+
+    supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) { showDash(session.user); initCharts(); }
+      else { showAuth(); }
+    });
+
+    refreshSessionAndRoute();
+  </script>
+</body>
+</html>
