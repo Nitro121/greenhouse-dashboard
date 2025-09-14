@@ -171,7 +171,6 @@
       if (root_high && sb !== "Dry") out.push("Root temperature high, monitor and water if drying.");
 
       if (!out.length) out.push("Conditions stable.");
-      // Deduplicate
       return [...new Set(out)].join("\n");
     }
 
@@ -283,7 +282,6 @@
               ticks: {
                 color: "#eee",
                 callback: (v, i, ticks) => {
-                  // v is epoch seconds; label is minutes ago (0..60)
                   const max = ticks?.[ticks.length-1]?.value ?? (Date.now()/1000);
                   const mins = Math.round((max - v)/60);
                   return `${mins}m`;
@@ -327,17 +325,15 @@
       if (y < r.min - 5 || y > r.max + 5) return; // drop absurd outliers
       const ds = chart.data.datasets[0].data;
       ds.push({ x: xEpoch, y });
-      // Trim by time window
       const minX = (Date.now()/1000) - WINDOW_SEC;
       while (ds.length && ds[0].x < minX) ds.shift();
-      // Trim by hard cap
       if (ds.length > MAX_POINTS) ds.splice(0, ds.length - MAX_POINTS);
     }
 
-    const zoneViews = {};   // per-zone DOM built flags
-    const zoneCharts = {};  // per-zone chart objects
-    const zoneStatus = {};  // per-zone status elements
-    const rtChannels = [];  // realtime channels (zone views)
+    const zoneViews = {};
+    const zoneCharts = {};
+    const zoneStatus = {};
+    const rtChannels = [];
 
     function zoneViewHTML(z) {
       const t = ZONE_TABLES[z];
@@ -346,6 +342,7 @@
           <span class="pill">Zone ${z}</span>
           <span class="pill">Table: ${t}</span>
           <button class="btn" id="z${z}-refresh">Refresh</button>
+          <button class="btn" id="z${z}-dl-csv">Download CSV</button>
           <span class="status" id="z${z}-status"></span>
         </div>
         <div class="row" style="margin-bottom:10px;">
@@ -388,6 +385,7 @@
         root: makeLineChart(document.getElementById(`z${z}-root`), COLORS.root, "Root °C", Y_RANGES.root),
       };
       document.getElementById(`z${z}-refresh`).onclick = () => loadInitialSeries(z);
+      document.getElementById(`z${z}-dl-csv`).onclick = () => downloadZoneCSV(z);
       await loadInitialSeries(z);
       subscribeZoneRealtime(z);
       zoneViews[z] = true;
@@ -404,7 +402,6 @@
           .order("epoch", { ascending: true });
         if (error) throw error;
         const charts = zoneCharts[z];
-        // reset datasets
         Object.values(charts).forEach(ch => ch.data.datasets[0].data = []);
         (data || []).forEach(r => {
           const x = toNum(r.epoch);
@@ -414,9 +411,7 @@
           if (r.soil_v != null) sanitizeAndPush(charts.soil, x, Number(r.soil_v), "soil");
           if (r.root_c != null) sanitizeAndPush(charts.root, x, Number(r.root_c), "root");
         });
-        // Update header pills with last values if present
         updateZoneHeaderFromCharts(z);
-        // Slide window and draw
         Object.values(charts).forEach(ch => { updateXWindow(ch); ch.update('none'); });
         zoneStatus[z].textContent = "";
       } catch (e) {
@@ -472,6 +467,41 @@
       });
     }, 30_000);
 
+    // ---------- Download full table (CSV) per-zone ----------
+    async function downloadZoneCSV(z) {
+      const table = ZONE_TABLES[z];
+      const url = `${SUPABASE_URL}/rest/v1/${table}?select=*&order=epoch.asc`;
+      try {
+        zoneStatus[z].textContent = "Preparing download…";
+        const resp = await fetch(url, {
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            Accept: "text/csv",
+            "Range-Unit": "items",
+            // Large upper bound to attempt full-table download in one request (subject to PostgREST limits)
+            Range: "0-9999999"
+          }
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          throw new Error(`HTTP ${resp.status}: ${t.slice(0,180)}`);
+        }
+        const blob = await resp.blob();
+        const a = document.createElement("a");
+        const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0,19);
+        a.href = URL.createObjectURL(blob);
+        a.download = `${table}-${ts}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        zoneStatus[z].textContent = "";
+      } catch (e) {
+        zoneStatus[z].textContent = `Download failed: ${e.message || e}`;
+      }
+    }
+
     // ---------- Navigation (Home + Zone pages) ----------
     const views = {
       home: document.getElementById("view-home"),
@@ -481,16 +511,12 @@
       "zone-4": document.getElementById("view-zone-4"),
     };
     function switchView(id) {
-      // Toggle buttons
       document.querySelectorAll('.nav .btn').forEach(b => b.classList.toggle('active', b.dataset.view === id));
-      // Toggle sections
       Object.entries(views).forEach(([k, el]) => el.classList.toggle('hidden', k !== id));
-      // Lazy build zone view
       if (id.startsWith("zone-")) {
         const z = Number(id.split("-")[1]);
         ensureZoneView(z);
       }
-      // Update hash
       location.hash = id;
     }
     document.getElementById("nav").addEventListener("click", (e) => {
@@ -498,7 +524,6 @@
         switchView(e.target.dataset.view);
       }
     });
-    // Deep-link via hash
     const startView = (location.hash || "#home").slice(1);
     if (views[startView]) switchView(startView); else switchView("home");
 
