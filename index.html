@@ -2,9 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Greenhouse Dashboard</title>
+  <title>Greenhouse Dashboard (Public Read)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
   <style>
     :root { --bg:#0b0f0c; --card:#0f1511; --muted:#9fb3a6; --accent:#2e8b57; --border:#1e3b2a; --text:#f3f7f4; }
     * { box-sizing: border-box; }
@@ -20,8 +19,8 @@
     .chart-card h4 { margin:4px 0 8px; color:var(--muted); font-weight:600; }
     .footer { text-align:center; color:var(--muted); padding:20px 0 60px; }
     .note { color: var(--muted); font-size: 14px; }
+    .warn { color: #ffb4a6; font-size: 14px; }
   </style>
-
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -32,8 +31,12 @@
 
   <main>
     <section class="card">
-      <h2>Zones: zone1 — zone4</h2>
-      <p class="note">This page is public-read. Ensure you are using the Supabase anon public key, not the service key.</p>
+      <h2>Zones: 1 — 4</h2>
+      <p class="note">
+        This page reads from table "readings" for device_id=greenhouseA. No sign-in required.
+        Be sure RLS allows anon SELECT on public.readings and the table is added to supabase_realtime.
+      </p>
+      <div id="status" class="warn"></div>
       <div id="zonesContainer" class="zones"></div>
     </section>
   </main>
@@ -45,17 +48,18 @@
   <script>
     // Supabase config (from your .env and Supabase Settings)
     const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co"; // from .env
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1Nzc2NTA4NSwiZXhwIjoyMDczMzQxMDg1fQ.DthLi51vD04-odNZqYO9n44ObB9actAaevlRWQmD9Ro";     // Settings > API > Public anon key
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NjUwODUsImV4cCI6MjA3MzM0MTA4NX0.z6NDGzZqhSjuxDQj4kkw9ZF-wLKRQNKoEXxz9htlZgY";     // Settings > API > Public anon key
+    const DEVICE_ID = "greenhouseA";                                  // from .env
 
-    // Per-zone tables (columns: epoch, date, time, air_c, rh_pct, soil_v, root_c)
+    // Zones and chart setup
     const ZONES = [1,2,3,4];
-    const ZONE_TABLES = { 1: "zone1", 2: "zone2", 3: "zone3", 4: "zone4" };
     const HISTORY_MINUTES = 60;
-
     const COLORS = { air:"#00FFFF", rh:"#FFD700", soil:"#FF7F50", root:"#7CFC00" };
+
     const { createClient } = window.supabase;
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+    const statusEl = document.getElementById("status");
     const zonesContainer = document.getElementById("zonesContainer");
     const charts = {};
 
@@ -63,7 +67,7 @@
       const wrap = document.createElement("section");
       wrap.className = "card zone";
       wrap.innerHTML = `
-        <h3>Zone ${zone} (${ZONE_TABLES[zone]})</h3>
+        <h3>Zone ${zone}</h3>
         <div class="grid">
           <div class="chart-card"><h4>Air Temp (°C)</h4><canvas id="z${zone}-air"></canvas></div>
           <div class="chart-card"><h4>Relative Humidity (%)</h4><canvas id="z${zone}-rh"></canvas></div>
@@ -104,20 +108,22 @@
     }
 
     async function loadInitial(zone) {
-      const table = ZONE_TABLES[zone];
       const since = (Date.now()/1000) - (HISTORY_MINUTES * 60);
       const { data, error } = await supabase
-        .from(table)
-        .select("epoch, air_c, rh_pct, soil_v, root_c")
-        .gt("epoch", since)
-        .order("epoch", { ascending: true });
+        .from("readings")
+        .select("ts_utc, air_c, rh_pct, soil_v, root_c")
+        .eq("device_id", DEVICE_ID)
+        .eq("zone", zone)
+        .gt("ts_utc", since)
+        .order("ts_utc", { ascending: true });
 
       if (error) {
-        console.warn(`Initial load error for ${table}:`, error);
+        console.warn(`Initial load error (zone ${zone}):`, error);
+        statusEl.textContent = `Error loading data: ${error.message}`;
         return;
       }
       for (const r of (data || [])) {
-        const x = r.epoch;
+        const x = r.ts_utc;
         if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
         if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
         if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
@@ -135,21 +141,24 @@
     }
 
     function subscribeRealtime(zone) {
-      const table = ZONE_TABLES[zone];
       const ch = supabase
-        .channel(`realtime:${table}`)
-        .on("postgres_changes", { event: "INSERT", schema: "public", table }, (payload) => {
-          const r = payload.new;
-          const x = r.epoch;
-          if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
-          if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
-          if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
-          if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
-          keepWithinHours(zone, 6);
-          Object.values(charts[zone]).forEach(c => c.update());
-        })
-        .subscribe(status => {
-          if (status === "SUBSCRIBED") console.log(`Realtime subscribed: ${table}`);
+        .channel(`rt:readings:z${zone}`)
+        .on("postgres_changes",
+          { event: "INSERT", schema: "public", table: "readings", filter: `device_id=eq.${DEVICE_ID}` },
+          (payload) => {
+            const r = payload.new || {};
+            if (r.zone !== zone) return;
+            const x = r.ts_utc;
+            if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
+            if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
+            if (r.soil_v != null) charts[zone].soil.data.datasets[0].data.push({ x, y: r.soil_v });
+            if (r.root_c != null) charts[zone].root.data.datasets[0].data.push({ x, y: r.root_c });
+            keepWithinHours(zone, 6);
+            Object.values(charts[zone]).forEach(c => c.update());
+          }
+        )
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") console.log(`Realtime subscribed for Zone ${zone}`);
         });
       return ch;
     }
