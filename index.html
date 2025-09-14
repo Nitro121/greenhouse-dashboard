@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Greenhouse Dashboard — Text Only (Public Read)</title>
+  <title>Greenhouse Dashboard — Text Only (Per-Zone Tables)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0b0f0c; --card:#0f1511; --muted:#9fb3a6; --accent:#2e8b57; --border:#1e3b2a; --text:#f3f7f4; }
@@ -32,18 +32,16 @@
   <main>
     <section class="card">
       <div id="status" class="status"></div>
-      <div class="zones" id="zonesContainer">
-        <!-- Zone cards injected by JS -->
-      </div>
+      <div class="zones" id="zonesContainer"></div>
     </section>
   </main>
 
   <script>
-    // Supabase config (public)
+    // Supabase config (public anon key is safe to embed)
     const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NjUwODUsImV4cCI6MjA3MzM0MTA4NX0.z6NDGzZqhSjuxDQj4kkw9ZF-wLKRQNKoEXxz9htlZgY";
 
-    // Tables per zone
+    // Four separate tables, one per zone
     const ZONES = [1,2,3,4];
     const ZONE_TABLES = { 1:"zone1", 2:"zone2", 3:"zone3", 4:"zone4" };
 
@@ -53,7 +51,6 @@
     const statusEl = document.getElementById("status");
     const zonesContainer = document.getElementById("zonesContainer");
 
-    // Build static cards
     function zoneCardHTML(zone) {
       const t = ZONE_TABLES[zone];
       return `
@@ -71,26 +68,11 @@
     }
     zonesContainer.innerHTML = ZONES.map(z => zoneCardHTML(z)).join("");
 
-    // State for "last updated"
     const lastEpoch = { 1:null, 2:null, 3:null, 4:null };
 
     function fmt(v, d, suf) {
       if (v === null || v === undefined || !Number.isFinite(v)) return `-- ${suf}`;
       return `${v.toFixed(d)} ${suf}`;
-    }
-    function updateZoneUI(zone, row) {
-      if (!row) return;
-      const air  = toNum(row.air_c);
-      const rh   = toNum(row.rh_pct);
-      const soil = toNum(row.soil_v);
-      const root = toNum(row.root_c);
-      setText(`z${zone}-air`,  fmt(air, 1, "°C"));
-      setText(`z${zone}-rh`,   fmt(rh, 0, "%"));
-      setText(`z${zone}-soil`, fmt(soil, 3, "V"));
-      setText(`z${zone}-root`, fmt(root, 1, "°C"));
-      const ep = toNum(row.epoch);
-      if (ep) lastEpoch[zone] = ep;
-      refreshUpdated(zone);
     }
     function setText(id, txt) {
       const el = document.getElementById(id);
@@ -114,8 +96,22 @@
       const el = document.getElementById(`z${zone}-updated`);
       if (el) el.textContent = `Last update: ${agoString(lastEpoch[zone])}`;
     }
-    // Periodically refresh "ago"
     setInterval(() => { ZONES.forEach(refreshUpdated); }, 10_000);
+
+    function updateZoneUI(zone, row) {
+      if (!row) return;
+      const air  = toNum(row.air_c);
+      const rh   = toNum(row.rh_pct);
+      const soil = toNum(row.soil_v);
+      const root = toNum(row.root_c);
+      setText(`z${zone}-air`,  fmt(air, 1, "°C"));
+      setText(`z${zone}-rh`,   fmt(rh, 0, "%"));
+      setText(`z${zone}-soil`, fmt(soil, 3, "V"));
+      setText(`z${zone}-root`, fmt(root, 1, "°C"));
+      const ep = toNum(row.epoch);
+      if (ep) lastEpoch[zone] = ep;
+      refreshUpdated(zone);
+    }
 
     async function loadLatest(zone) {
       const table = ZONE_TABLES[zone];
@@ -128,8 +124,8 @@
         if (error) throw error;
         if (data && data.length) updateZoneUI(zone, data[0]);
       } catch (e) {
-        console.warn(`Initial load error (${table}):`, e);
-        statusEl.textContent = `Load error for ${table}: ${e.message || e}`;
+        console.warn(`Load error ${table}:`, e);
+        statusEl.textContent = `Load error ${table}: ${e.message || e}`;
       }
     }
 
@@ -145,19 +141,15 @@
           }
         )
         .subscribe((status) => {
-          if (status === "SUBSCRIBED") {
-            console.log(`Realtime subscribed: ${table}`);
-          }
+          if (status === "SUBSCRIBED") console.log(`Realtime subscribed: ${table}`);
         });
       return ch;
     }
 
     async function init() {
-      // Load latest once
       await Promise.all(ZONES.map(loadLatest));
-      // Subscribe realtime
       ZONES.forEach(subscribeZone);
-      // Light polling fallback (in case realtime is blocked)
+      // Poll fallback in case realtime is blocked by network
       setInterval(() => { ZONES.forEach(loadLatest); }, 60_000);
     }
 
