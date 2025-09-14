@@ -4,7 +4,63 @@
   <meta charset="utf-8" />
   <title>Greenhouse Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="./styles.css" />
+
+  <!-- Styles (inline for single-file deploy) -->
+  <style>
+    :root {
+      --bg: #0b0f0c;
+      --card: #0f1511;
+      --muted: #9fb3a6;
+      --accent: #2e8b57;
+      --border: #1e3b2a;
+      --text: #f3f7f4;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+
+    .topbar {
+      display: flex; align-items: center; padding: 10px 14px;
+      background: #0c150f; border-bottom: 1px solid var(--border);
+    }
+    .brand { font-weight: 700; letter-spacing: 0.4px; }
+    .spacer { flex: 1; }
+    .userbox { display: flex; gap: 10px; align-items: center; }
+    .hidden { display: none; }
+
+    .btn {
+      background: var(--accent); color: white; border: none; padding: 8px 12px; border-radius: 8px;
+      cursor: pointer;
+    }
+
+    main { padding: 16px; max-width: 1320px; margin: 0 auto; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px; margin-bottom: 16px;
+    }
+
+    .auth { max-width: 420px; margin: 40px auto; }
+    .auth input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: #0e1511; color: var(--text); }
+    .auth .muted { color: var(--muted); margin-top: 8px; }
+
+    .dashboard h2 { margin: 6px 0 12px; }
+    .zones {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .zone h3 { margin: 6px 0 10px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .chart-card { min-height: 240px; }
+    .chart-card h4 { margin: 4px 0 8px; color: var(--muted); font-weight: 600; }
+
+    .footer { text-align: center; color: var(--muted); padding: 20px 0 60px; }
+  </style>
+
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <!-- Supabase JS v2 -->
@@ -42,9 +98,11 @@
   </footer>
 
   <script>
-    // ------------------ Configure your project ------------------
-    const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";       // <- replace
-    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY";              // <- replace
+    // --------------- Configure your project ---------------
+    // Using SUPABASE_URL from your .env: https://qzkvrcscrjkppcnuvbdt.supabase.co
+    const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co";
+    // IMPORTANT: Replace with your anon public key (Project Settings > API). Do NOT use the service key here.
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1Nzc2NTA4NSwiZXhwIjoyMDczMzQxMDg1fQ.DthLi51vD04-odNZqYO9n44ObB9actAaevlRWQmD9Ro";
 
     // Per-zone tables in your DB
     const ZONES = [1, 2, 3, 4];
@@ -52,8 +110,8 @@
 
     // Minutes of history to load initially
     const HISTORY_MINUTES = 60;
+    // ------------------------------------------------------
 
-    // ------------------------------------------------------------
     const COLORS = { air: "#00FFFF", rh: "#FFD700", soil: "#FF7F50", root: "#7CFC00" };
     const { createClient } = window.supabase;
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -139,7 +197,7 @@
         console.warn("initial load error", table, error);
         return;
       }
-      for (const r of data) {
+      for (const r of (data || [])) {
         const x = r.epoch;
         if (r.air_c  != null) charts[zone].air.data.datasets[0].data.push({ x, y: r.air_c });
         if (r.rh_pct != null) charts[zone].rh.data.datasets[0].data.push({ x, y: r.rh_pct });
@@ -171,7 +229,9 @@
           keepWithinHours(zone, 6);
           Object.values(charts[zone]).forEach(c => c.update());
         })
-        .subscribe();
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") console.log(`Realtime subscribed: ${table}`);
+        });
       return channel;
     }
 
@@ -188,7 +248,12 @@
       dashSection.classList.remove("hidden");
     }
 
+    let activeChannels = [];
     async function initCharts() {
+      // Cleanup prior subscriptions if any
+      activeChannels.forEach(ch => supabase.removeChannel(ch));
+      activeChannels = [];
+
       zonesContainer.innerHTML = "";
       for (const z of ZONES) {
         createZoneCard(z);
@@ -200,11 +265,12 @@
         };
       }
       await Promise.all(ZONES.map(z => loadInitial(z)));
-      ZONES.forEach(z => subscribeRealtime(z));
+      activeChannels = ZONES.map(z => subscribeRealtime(z));
     }
 
     async function refreshSessionAndRoute() {
-      const { data } = await supabase.auth.getSession();
+      const { data, error } = await supabase.auth.getSession();
+      if (error) console.warn("getSession error:", error);
       if (data.session && data.session.user) {
         showDash(data.session.user);
         initCharts();
@@ -213,18 +279,36 @@
       }
     }
 
-    // Auth: Magic link
+    // Auth: Magic link with explicit redirect (must be allow-listed in Supabase Auth settings)
     loginForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       const email = emailInput.value.trim();
       if (!email) return;
+
+      const redirectTo = window.location.origin + window.location.pathname;
+
       authMsg.textContent = "Sending magic link…";
-      const { error } = await supabase.auth.signInWithOtp({ email });
-      authMsg.textContent = error ? `Error: ${error.message}` : "Check your email for the magic link.";
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: redirectTo,
+          shouldCreateUser: true
+        }
+      });
+
+      if (error) {
+        console.error("signInWithOtp error:", error);
+        authMsg.textContent = `Error: ${error.message}`;
+      } else {
+        authMsg.textContent = "Check your email for the magic link.";
+      }
     });
 
     signOutBtn.addEventListener("click", async () => {
       await supabase.auth.signOut();
+      // Clean up realtime subscriptions
+      activeChannels.forEach(ch => supabase.removeChannel(ch));
+      activeChannels = [];
       location.reload();
     });
 
@@ -233,6 +317,7 @@
       else { showAuth(); }
     });
 
+    // Kick off
     refreshSessionAndRoute();
   </script>
 </body>
