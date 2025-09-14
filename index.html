@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Greenhouse Dashboard (Public Read, 4 zone tables)</title>
+  <title>Greenhouse Dashboard — Text Only (Public Read)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0b0f0c; --card:#0f1511; --muted:#9fb3a6; --accent:#2e8b57; --border:#1e3b2a; --text:#f3f7f4; }
@@ -10,203 +10,155 @@
     html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     .topbar { display:flex; align-items:center; padding:10px 14px; background:#0c150f; border-bottom:1px solid var(--border); }
     .brand { font-weight:700; letter-spacing:.4px; }
-    main { padding:16px; max-width:1320px; margin:0 auto; }
+    main { padding:16px; max-width:1100px; margin:0 auto; }
     .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:16px; }
     .zones { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:16px; }
+    @media (max-width: 900px) { .zones { grid-template-columns: 1fr; } }
     .zone h3 { margin:6px 0 10px; }
-    .grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; }
-    /* Hard-fix chart sizing to stop page growth */
-    .chart-card { height: 260px; position: relative; overflow: hidden; }
-    .chart-card canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; display:block; }
-    @media (max-width: 900px) { .zones { grid-template-columns: 1fr; } .chart-card { height: 220px; } }
-    .chart-card h4 { margin:4px 0 8px; color:var(--muted); font-weight:600; }
-    .footer { text-align:center; color:var(--muted); padding:20px 0 60px; }
-    .note { color: var(--muted); font-size: 14px; }
-    .warn { color: #ffb4a6; font-size: 14px; }
+    .kv { display:grid; grid-template-columns: 160px 1fr; gap:6px 12px; align-items:center; }
+    .k { color: var(--muted); }
+    .v { font-variant-numeric: tabular-nums; }
+    .updated { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .status { color:#ffb4a6; font-size:14px; margin-bottom:10px; min-height: 1.2em; }
+    .badge { display:inline-block; padding:2px 8px; border:1px solid var(--border); border-radius:999px; color:#cfe9dc; background:#143a27; font-size:12px; margin-left:8px;}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Greenhouse Dashboard (Public Read)</div>
+    <div class="brand">Greenhouse Dashboard — Text Only</div>
   </header>
 
   <main>
     <section class="card">
-      <h2>Zones: 1 — 4 (tables: public.zone1..zone4)</h2>
-      <p class="note">Reads from 4 separate tables (zone1..zone4). Anon SELECT via RLS, realtime on each table.</p>
-      <div id="status" class="warn"></div>
-      <div id="zonesContainer" class="zones"></div>
+      <div id="status" class="status"></div>
+      <div class="zones" id="zonesContainer">
+        <!-- Zone cards injected by JS -->
+      </div>
     </section>
   </main>
 
-  <footer class="footer">
-    <span>Powered by Supabase</span>
-  </footer>
-
   <script>
-    // Supabase config
+    // Supabase config (public)
     const SUPABASE_URL = "https://qzkvrcscrjkppcnuvbdt.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF6a3ZyY3NjcmprcHBjbnV2YmR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3NjUwODUsImV4cCI6MjA3MzM0MTA4NX0.z6NDGzZqhSjuxDQj4kkw9ZF-wLKRQNKoEXxz9htlZgY";
 
-    // Zones and tables
-    const ZONES = [1, 2, 3, 4];
-    const ZONE_TABLES = { 1: "zone1", 2: "zone2", 3: "zone3", 4: "zone4" };
-
-    // History and limits
-    const HISTORY_MINUTES = 60;   // initial history to load
-    const LIVE_WINDOW_HOURS = 6;  // keep last N hours live
-    const MAX_POINTS = 4000;      // hard cap per series
-
-    // Fixed Y ranges (prevents runaway autoscale)
-    const Y_RANGES = {
-      air:  { min: -10, max: 50 },
-      rh:   { min:   0, max: 100 },
-      soil: { min:   0, max: 5.0 },
-      root: { min: -10, max: 50 },
-    };
-
-    const COLORS = { air:"#00FFFF", rh:"#FFD700", soil:"#FF7F50", root:"#7CFC00" };
+    // Tables per zone
+    const ZONES = [1,2,3,4];
+    const ZONE_TABLES = { 1:"zone1", 2:"zone2", 3:"zone3", 4:"zone4" };
 
     const { createClient } = window.supabase;
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     const statusEl = document.getElementById("status");
     const zonesContainer = document.getElementById("zonesContainer");
-    const charts = {};
-    const channels = [];
 
-    function createZoneCard(zone) {
-      const wrap = document.createElement("section");
-      wrap.className = "card zone";
-      wrap.innerHTML = `
-        <h3>Zone ${zone} (${ZONE_TABLES[zone]})</h3>
-        <div class="grid">
-          <div class="chart-card"><h4>Air Temp (°C)</h4><canvas id="z${zone}-air"></canvas></div>
-          <div class="chart-card"><h4>Relative Humidity (%)</h4><canvas id="z${zone}-rh"></canvas></div>
-          <div class="chart-card"><h4>Soil Voltage (V)</h4><canvas id="z${zone}-soil"></canvas></div>
-          <div class="chart-card"><h4>Root Temp (°C)</h4><canvas id="z${zone}-root"></canvas></div>
-        </div>`;
-      zonesContainer.appendChild(wrap);
+    // Build static cards
+    function zoneCardHTML(zone) {
+      const t = ZONE_TABLES[zone];
+      return `
+        <section class="card zone" id="zone-${zone}">
+          <h3>Zone ${zone} <span class="badge">${t}</span></h3>
+          <div class="kv">
+            <div class="k">Air Temp</div><div class="v" id="z${zone}-air">-- °C</div>
+            <div class="k">Relative Humidity</div><div class="v" id="z${zone}-rh">-- %</div>
+            <div class="k">Soil Voltage</div><div class="v" id="z${zone}-soil">-- V</div>
+            <div class="k">Root Temp</div><div class="v" id="z${zone}-root">-- °C</div>
+          </div>
+          <div class="updated" id="z${zone}-updated">Last update: --</div>
+        </section>
+      `;
     }
+    zonesContainer.innerHTML = ZONES.map(z => zoneCardHTML(z)).join("");
 
-    function makeLineChart(canvas, color, label, yrange) {
-      const ctx = canvas.getContext("2d");
-      return new Chart(ctx, {
-        type: "line",
-        data: { datasets: [{ label, data: [], borderColor: color, pointRadius: 0, borderWidth: 1.4, tension: 0.2 }] },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,      // we control size via CSS
-          resizeDelay: 150,                 // debounce to avoid resize loops
-          animation: false,
-          parsing: false,
-          scales: {
-            x: {
-              type: "linear",
-              ticks: {
-                color: "#eee",
-                callback: (v) => {
-                  const now = Date.now()/1000;
-                  const mins = Math.max(0, Math.round((now - v)/60));
-                  return `${mins}m`;
-                }
-              },
-              grid: { color: "rgba(255,255,255,0.1)" }
-            },
-            y: {
-              min: yrange.min,
-              max: yrange.max,
-              ticks: { color: "#eee" },
-              grid: { color: "rgba(255,255,255,0.1)" }
-            }
-          },
-          plugins: {
-            legend: { labels: { color: "#eee" } },
-            tooltip: { callbacks: { title: (items) => new Date(items[0].parsed.x*1000).toLocaleString() } }
-          },
-          layout: { padding: { left: 8, right: 8, top: 6, bottom: 6 } }
-        }
-      });
+    // State for "last updated"
+    const lastEpoch = { 1:null, 2:null, 3:null, 4:null };
+
+    function fmt(v, d, suf) {
+      if (v === null || v === undefined || !Number.isFinite(v)) return `-- ${suf}`;
+      return `${v.toFixed(d)} ${suf}`;
     }
-
-    function sanitizeAndPush(chart, x, y, key) {
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      const r = Y_RANGES[key];
-      if (y < r.min - 5 || y > r.max + 5) return; // drop absurd outliers
-      const ds = chart.data.datasets[0].data;
-      ds.push({ x, y });
-      // Trim by rolling time window
-      const cutoff = (Date.now()/1000) - (LIVE_WINDOW_HOURS * 3600);
-      while (ds.length && ds[0].x <= cutoff) ds.shift();
-      // Trim by hard cap
-      if (ds.length > MAX_POINTS) ds.splice(0, ds.length - MAX_POINTS);
+    function updateZoneUI(zone, row) {
+      if (!row) return;
+      const air  = toNum(row.air_c);
+      const rh   = toNum(row.rh_pct);
+      const soil = toNum(row.soil_v);
+      const root = toNum(row.root_c);
+      setText(`z${zone}-air`,  fmt(air, 1, "°C"));
+      setText(`z${zone}-rh`,   fmt(rh, 0, "%"));
+      setText(`z${zone}-soil`, fmt(soil, 3, "V"));
+      setText(`z${zone}-root`, fmt(root, 1, "°C"));
+      const ep = toNum(row.epoch);
+      if (ep) lastEpoch[zone] = ep;
+      refreshUpdated(zone);
     }
-
-    function updateAll(zone) {
-      Object.values(charts[zone]).forEach(c => c.update('none'));
+    function setText(id, txt) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = txt;
     }
+    function toNum(x) {
+      const n = Number(x);
+      return Number.isFinite(n) ? n : null;
+    }
+    function agoString(epochSec) {
+      if (!epochSec) return "--";
+      const diff = Math.max(0, Math.floor(Date.now()/1000 - epochSec));
+      if (diff < 5) return "just now";
+      if (diff < 60) return `${diff}s ago`;
+      const m = Math.floor(diff/60);
+      if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m/60);
+      return `${h}h ago`;
+    }
+    function refreshUpdated(zone) {
+      const el = document.getElementById(`z${zone}-updated`);
+      if (el) el.textContent = `Last update: ${agoString(lastEpoch[zone])}`;
+    }
+    // Periodically refresh "ago"
+    setInterval(() => { ZONES.forEach(refreshUpdated); }, 10_000);
 
-    async function loadInitial(zone) {
+    async function loadLatest(zone) {
       const table = ZONE_TABLES[zone];
-      const since = (Date.now()/1000) - (HISTORY_MINUTES * 60);
-      const { data, error } = await supabase
-        .from(table)
-        .select("epoch, air_c, rh_pct, soil_v, root_c")
-        .gt("epoch", since)
-        .order("epoch", { ascending: true });
-
-      if (error) {
-        console.warn(`Initial load error for ${table}:`, error);
-        statusEl.textContent = `Error loading ${table}: ${error.message}`;
-        return;
+      try {
+        const { data, error } = await supabase
+          .from(table)
+          .select("epoch, air_c, rh_pct, soil_v, root_c")
+          .order("epoch", { ascending: false })
+          .limit(1);
+        if (error) throw error;
+        if (data && data.length) updateZoneUI(zone, data[0]);
+      } catch (e) {
+        console.warn(`Initial load error (${table}):`, e);
+        statusEl.textContent = `Load error for ${table}: ${e.message || e}`;
       }
-      for (const r of (data || [])) {
-        const x = Number(r.epoch);
-        if (r.air_c  != null) sanitizeAndPush(charts[zone].air,  x, Number(r.air_c),  "air");
-        if (r.rh_pct != null) sanitizeAndPush(charts[zone].rh,   x, Number(r.rh_pct), "rh");
-        if (r.soil_v != null) sanitizeAndPush(charts[zone].soil, x, Number(r.soil_v), "soil");
-        if (r.root_c != null) sanitizeAndPush(charts[zone].root, x, Number(r.root_c), "root");
-      }
-      updateAll(zone);
     }
 
-    function subscribeRealtime(zone) {
+    function subscribeZone(zone) {
       const table = ZONE_TABLES[zone];
       const ch = supabase
         .channel(`rt:${table}`)
         .on("postgres_changes",
           { event: "INSERT", schema: "public", table },
           (payload) => {
-            const r = payload.new || {};
-            const x = Number(r.epoch);
-            if (r.air_c  != null) sanitizeAndPush(charts[zone].air,  x, Number(r.air_c),  "air");
-            if (r.rh_pct != null) sanitizeAndPush(charts[zone].rh,   x, Number(r.rh_pct), "rh");
-            if (r.soil_v != null) sanitizeAndPush(charts[zone].soil, x, Number(r.soil_v), "soil");
-            if (r.root_c != null) sanitizeAndPush(charts[zone].root, x, Number(r.root_c), "root");
-            updateAll(zone);
+            const row = payload.new || {};
+            updateZoneUI(zone, row);
           }
         )
         .subscribe((status) => {
-          if (status === "SUBSCRIBED") console.log(`Realtime subscribed: ${table}`);
+          if (status === "SUBSCRIBED") {
+            console.log(`Realtime subscribed: ${table}`);
+          }
         });
-      channels.push(ch);
+      return ch;
     }
 
     async function init() {
-      zonesContainer.innerHTML = "";
-      for (const z of ZONES) {
-        createZoneCard(z);
-        charts[z] = {
-          air:  makeLineChart(document.getElementById(`z${z}-air`),  COLORS.air,  "Air °C",  Y_RANGES.air),
-          rh:   makeLineChart(document.getElementById(`z${z}-rh`),   COLORS.rh,   "RH %",    Y_RANGES.rh),
-          soil: makeLineChart(document.getElementById(`z${z}-soil`), COLORS.soil, "Soil V",  Y_RANGES.soil),
-          root: makeLineChart(document.getElementById(`z${z}-root`), COLORS.root, "Root °C", Y_RANGES.root),
-        };
-      }
-      await Promise.all(ZONES.map(z => loadInitial(z)));
-      ZONES.forEach(z => subscribeRealtime(z));
+      // Load latest once
+      await Promise.all(ZONES.map(loadLatest));
+      // Subscribe realtime
+      ZONES.forEach(subscribeZone);
+      // Light polling fallback (in case realtime is blocked)
+      setInterval(() => { ZONES.forEach(loadLatest); }, 60_000);
     }
 
     init();
